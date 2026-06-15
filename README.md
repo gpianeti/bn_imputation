@@ -16,7 +16,7 @@ different imputation strategies on the performance of five classification models
 
 ```
 ├── data/                          # raw data files (not tracked by git)
-├── results/                       # saved .rds objects for each scenario
+├── results/                       # saved .rds objects for each scenario (not tracked by git)
 ├── data_loading_cleaning.R        # data loading, formatting and scenario setup
 ├── data_imputation.R              # BN structure learning, CV tuning, imputation
 ├── models_fitting.R               # model training and evaluation
