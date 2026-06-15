@@ -1,0 +1,447 @@
+---
+title: "Heart Disease Dataset Analysis"
+author: "Giuseppe Pianeti, Filippo Campagnolo"
+fontsize: 22px
+editor: visual
+format:
+  revealjs:
+    theme: default
+    mermaid:
+      theme: neutral
+title-slide-attributes:
+  data-background-image: "data_main_quarto.png"
+  data-background-size: "15%"
+  data-background-position: "bottom 5% right 5%"
+---
+
+```{r}
+#| include: false
+library(tidyverse)
+library(knitr)
+library(forcats)
+library(bnlearn)
+library(Rgraphviz)
+library(gRbase)
+library(summarytools)
+library(DT)
+library(kableExtra)
+library(here)
+data0 <- readRDS(file = here("results/scenario_0.rds"))
+data1 <- readRDS(file = here("results/scenario_1.rds"))
+data2 <- readRDS(file = here("results/scenario_2.rds"))
+data3 <- readRDS(file = here("results/scenario_3.rds"))
+data4 <- readRDS(file = here("results/scenario_4.rds"))
+hd <- readRDS(file = here("results/hd.rds"))
+```
+
+## The Heart Disease dataset
+
+:::::: {.columns style="display: flex; gap: 20px;"}
+::: {.column width="30%"}
+The **Heart Disease dataset** contains $14$ attributes of $920$ patients from $4$ different clinics in the world: Cleveland, Hungarian, Switzerland and Long Beach. So far, machine learning applications on this dataset have concerned on the Cleveland clinc only, which consists of roughly $1/3$ of the total samples, by trying to predict the presence of disease **`dis`**. In this work we attempt to include the other clinics and to deploy a sensitive analysis to compare the goodness of fit across different configurations of the dataset, using Random Forest (RF), Bayesian Additive Regression Trees (BART) and Bayesian Networks (BN) models.
+:::
+
+::: {.column width="30%"}
+-   `cp`: chest pain type (typical angina; atypical angina; non-anginal pain; asymptomatic)
+-   `trestbps`: resting blood pressure
+-   `chol` : serum cholestoral
+-   `fbs`: fasting blood sugar \> 120 mg/dl
+-   `restecg`: resting electrocardiographic results (normal; having ST-T wave abnormality; showing probable or definite left ventricular hypertrophy)
+-   `thalach`: maximum heart rate achieved
+-   `sex`
+:::
+
+::: {.column width="30%"}
+-   `exang`: exercise induced angina
+-   `oldpeak`: ST depression induced by exercise relative to rest
+-   `slope`: the slope of the peak exercise ST segment during ECG (upsloping, flat, downsloping)
+-   `ca`: number of major vessels colored by flourosopy (0-3)
+-   `thal`: results of thallium stress test (normal; fixed defect; reversable defect)
+-   `dis`: diagnosis of heart disease
+-   `age`
+:::
+::::::
+
+## MNAR missing data
+
+::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width = "30%"}
+
+```{r}
+#| echo: false
+completeobs <- data.frame(table(na.omit(hd)$location))
+names(completeobs) <- c("Location", "Complete cases")
+kable(completeobs)
+```
+
+Complete cases by location
+
+```{r}
+#| echo: false
+na_count <- hd %>%
+  group_by(location) %>%
+  summarise(
+    obs = n(),
+    across(c(slope, thal, ca), ~ sum(is.na(.x)))
+  )
+
+kable(na_count)
+```
+
+NA values for `slope`, `ca` and `thal` by location
+:::
+
+::: {.column width="70%"}
+-   As we can see, Cleveland is the only clinic reporting complete cases. This pattern clearly suggets MNAR missing data, i.e. the probability of being missing varies for reasons that are unknown to us, something likely linked to clinic procedures or protocols.
+-   We decided to use BN for data imputation to preserve statistical power. However, this procedure still needs a complete dataset to learn the joint variables distribution $\Pr(\mathbf{X})$, where $\mathbf{X}=\{X_1,X_2,\dots,X_p,Y\}$, to be used for data imputation, thus an omogeneity assumption is needed.
+-   By proceeding, we assume that the only MNAR data are the ones relative to `slope`, `ca` and `thal` and the other `NA` values are MCAR or at least MAR. Then, we assume omogeneity of these features over the clinic location and, therefore, the transferability of the estimated Bayesian Network from Cleveland to the other clinics. This assumption holds easily for `slope`, which is a parameter of a common, non-invasive diagnostic test. `ca` and `thal` refer instead to much more invasive and expensive tests that may be administered in a selective or different manner from one clinic to another; therefore, the assumption of homogeneity may not hold true.
+:::
+
+::::
+
+## Homogeneity graphic check {.scrollable}
+
+```{r}
+#| echo: false
+#| fig-width: 16
+#| fig-height: 16
+#| fig-dpi: 300
+
+num_vars <- hd %>% select(where(is.numeric)) %>% add_column(location = hd$location)
+cat_vars <- hd %>% select(where(~ !is.numeric(.)))
+cat_vars <- cat_vars %>% select(-c("slope", "ca", "thal"))
+
+num_long <- num_vars %>%
+  pivot_longer(- location,
+               names_to = "variabile",
+               values_to = "valore")
+cat_long <- cat_vars %>%
+  pivot_longer(- location,
+               names_to = "variabile",
+               values_to = "valore")
+
+# Numerical Plot
+ggplot(num_long, aes(valore)) +
+  # This line forces the 'ca' scale to 0-3 without drawing bars
+  geom_histogram(bins = 20, fill = "grey56", color = "grey") +
+  facet_wrap(~ variabile + location, scales = "free", ncol = 4) +
+  theme_minimal(base_size = 10) +
+  labs(title = "Numerical Variables") +
+  theme(
+    strip.text = element_text(size = 7),  
+    axis.text = element_text(size = 6), 
+    axis.title = element_blank()
+  )
+
+# Categorical Plot
+ggplot(cat_long %>% drop_na(valore), aes(x = valore)) +
+  geom_bar(fill = "grey78", color = "grey") +
+  facet_wrap(~ variabile + location, scales = "free", ncol = 4) +
+  theme_minimal(base_size = 10) +
+  labs(title = "Categorical Variables") +
+  theme(
+    strip.text = element_text(size = 7), 
+    axis.text = element_text(size = 6),   
+    axis.title = element_blank()
+  )
+```
+
+## Workflow
+
+```{mermaid}
+flowchart LR
+    A([Heart Disease<br>dataset]) --> B{Train/Test<br>split}
+    B --"train data"-->C
+    
+     subgraph datainput [Data imputation]
+        %% Nodi Interni
+        C["`**CV loop for<br>data imputation**<br>Tuning parameters:<br>- arcs penalty k<br>- max # parents`"] 
+    end
+    
+    datainput --> N([Imputed<br>train data])
+    
+    N --> D(Random<br>Forests)
+    N --> E(BART)
+    N --> F(Bayes<br>Net)
+    N --> G(Naive<br>Bayes)
+    N --> H(Augmented<br>NB)
+    
+        subgraph train [Models fitting]
+        %% Nodi Interni
+        D
+        E
+        F
+        G
+        H
+    end
+    
+    D --> I
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    
+    subgraph test [Testing]
+        %% Nodi Interni
+        I[Testing trained<br>models on<br>test data] 
+    end
+    
+    B --"test data"--> M([Imputed<br>test data])
+    datainput --> M
+    M --> test
+    
+    test ==> L([Final Results])
+```
+
+## Data Imputation
+
+::::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width="60%"}
+```{r}
+#| eval: false
+#| echo: true
+#| code-line-numbers: "|1|2|3-7|8|9-10|11-15"
+for: every hyperparameter value:
+  for: every fold:
+    - train/test split
+    - impute artificial NAs on test set
+    - learning the structure "G" on train set
+    - impute missing data with "G"
+    - compute recostruction error
+  average the errors => hyperparam score
+choose hyperparam with mininmum error
+
+learn the final DAG "FG" on the complete train data
+
+learn the parameters of "FG"
+
+impute missing data using "FG"
+```
+
+resulting DAG (for main analysis):
+
+```{r}
+graphviz.plot(data0$imputation_dag)
+```
+:::
+
+::: {.column width="30%"}
+-   With the cross validation we look for the arc penalization parameter (`k`) and the maximum number of parents (`maxp`) that minimize the reconstruction error of artificially imputed missing data.
+-   Then, we learn the final DAG and relative parameters on the complete train data.
+-   Finally we can impute the real missing data on both the original train and test sets. For this purpose the `bayes-lw` method was desirable, but the large amount of missing data made the local distribution computations non feasible. Therefore, `parents` method or a custom function, which imputes missing data only relying on parent nodes and their order, were eventually used.
+:::
+:::::
+
+## Models fitting and sensitivity analysis
+
+-   We fit the following models: Random Forests, BART, a structure learned Bayesian Network, Naive Bayes and Augmented Naive Bayes. <br>
+-   Every model was firstly fitted on the complete imputed dataset with every predictor. <br>
+-   In order to assess the goodness of fit and the assumptions made, we deploy a sensitivity analyisis by training the same models with same procedures also on the complete cases dataset (1), a mean/mode imputed version of the data (2), a BN imputed reduced version of the full dataset without `slope`, `ca` and `thal` (3) and one excluding `ca` and `thal` only (4).
+
+::::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width="80%"}
+```{mermaid}
+flowchart LR
+  E([train])
+
+  A([Imputed data]) --> E
+  
+   subgraph sens [Sensitivity<br>Analysis]
+        B([Complete data])
+        C([Partial data])
+        D([Slope data])
+        M([M/M imputed])
+    end
+  
+  sens --> E
+  
+  E --> H{CV for<br>tuning parameters}
+  
+  H --"parameters"-->F(Model<br>fitting)
+  
+  F --"fit"--> G[Testing]
+  
+  A --> L([test])
+  sens --> L
+  
+  L --> G
+  
+  G ==> I([Final results])
+```
+:::
+
+::: {.column width="20%"}
+Performance measure: $$
+BA=\frac{sens +spec}{2}
+$$ Balanced Accuracy, where $sens$ is the sensitivity (or recall) while $spec$ is the specificity.
+:::
+:::::
+
+## Main Analysis (imputed data)
+
+::::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width="50%"}
+#### Fitted Models
+
+-   For the **RF** model we used a $10$ fold cross validation to assess the number of trees to be averaged and the maximum node size. The proportion of predictors to be used to grow the trees is set to $\sqrt(p)$.
+-   For the **BART** we validated the number of trees per iteration (`ntree`), the prior variance of $f(x)$ (`k`) and two parameters for controlling the probability of split (`base` and `power`): $$
+    \Pr(\text{split at depth }d) = \text{base} \cdot (1+d)^{-\text{power}}
+    $$
+-   With the **BN** model we learned the structure from the data, using the blacklist on the right and BIC penalization for the number of arcs. Then, we learned the parameters with `bn.fit()` and predicted the response.
+:::
+
+::: {.column width="50%"}
+-   For the fixed structure methods (**NB** and **TAN**) we simply learned the parameters and predicted the output class as above, using the predictors as hard evicende.
+
+```{r, message=FALSE}
+#| echo: false
+#| results: hide
+graphviz.plot(data0$bn_dag)
+```
+
+DAG used for BN fit
+
+```{r}
+kable(data.frame(from = c("every node", "every node"), to = c("sex", "age")))
+```
+
+Blacklist used for BN fit
+:::
+:::::
+
+## Sensitivity Analysis (1)
+
+Four different configurations of the dataset we decided to analyze to evaluate the goodness of missing data imputation and the assumptions made. <br> These two scenarios were choosen to test, if the homogeneity assumption holds, whether the BN imputation led to an improvement of the performances: <br>
+
+::::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width="50%"}
+### Complete cases only (1)
+
+-   In this scenario we followed the same exact workflow of the main analysis but filtering the original dataset with `na.omit()` and, thus, using almost only the Cleveland observations.
+-   Using only complete instances, data imputation is not needed and the relative DAG was not computed
+-   If the homogeneity assumption holds and, thus, the dag learned on cleveland can be transferred on other clinics, this scenario tells us whether including imputed incomplete cases brings any improvement over the performances.
+:::
+
+::: {.column width="50%"}
+### Mean/mode imputation (2)
+
+-   Here we test a different and more naive way for imputing missing data based on mean for continuous variables and mode for discrete variables. Being a much more rude and straighforward method we expect worst performance on the test set.
+-   Using only complete instances, data imputation is not needed and the relative DAG was not computed
+-   Always if homogeneity assumption holds, we expect to see worst accuracy performances, being MM imputation a much more rude and straighforward method of imputing data.
+:::
+:::::
+
+## Sensitivity Analysis (2)
+
+Four different configurations of the dataset we decided to analyze to evaluate the goodness of missing data imputation and the assumptions made. <br> These two scenarios were chosen to test whether the homogeneity assumption holds. If we notice an improvement of the performance, by excluding the problematic predictors, this probably means that the BN learned on cleveland is not transferable to other clinics: <br>
+
+::::: {.columns style="display: flex; gap: 50px;"}
+::: {.column width="50%"}
+### Partial data (3)
+
+-   Here we excluded the variables with the largest number of `NA` values, i.e. `slope`, `ca`, and `thal`.
+
+```{r}
+graphviz.plot(data3$imputation_dag)
+```
+
+DAG adopted for imputation
+:::
+
+::: {.column width="50%"}
+### Slope data (4)
+
+-   Considering that `slope` has a much smaller number of `NA`s comparing to `ca` and `thal`, we created one last scenario where we exclude the latters and keep the former.
+
+```{r}
+graphviz.plot(data4$imputation_dag)
+```
+
+DAG adopted for imputation
+:::
+:::::
+
+## Models Performance: Comparison of Scenarios
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table <- function(byloc_matrix, g_values, title) {
+  loc_df <- as_tibble(byloc_matrix)
+  colnames(loc_df)[1] <- "location"
+
+  clinic_levels <- c("ch", "cl", "hu", "va")
+  
+  loc_df <- loc_df %>%
+    mutate(location = clinic_levels[as.integer(location)]) %>% 
+    mutate(across(-location, as.numeric))           
+
+  g_row <- as_tibble(t(g_values)) %>%
+    mutate(location = "Global Performance") %>%
+    relocate(location)
+  
+  colnames(g_row) <- colnames(loc_df)
+
+  total_rows <- nrow(loc_df) + 1
+
+  bind_rows(loc_df, g_row) %>%
+    kable(digits = 3, format = "html", caption = title) %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"), 
+                  font_size = 16, full_width = TRUE) %>%
+    row_spec(total_rows, bold = TRUE, background = "#f2f2f2") 
+}
+```
+
+::: {layout-ncol="2" layout-nrow="2"}
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table(data0[[5]]$byloc.acc, data0[[5]]$gen.acc, "Main Analysis")
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table(data3[[5]]$byloc.acc, data3[[5]]$gen.acc, "Partial Data")
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table(data4[[5]]$byloc.acc, data4[[5]]$gen.acc, "Slope data")
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table(data2[[5]]$byloc.acc, data2[[5]]$gen.acc, "Mean/mode data")
+```
+:::
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+global_only_df <- as_tibble(t(data1[[5]]$gen.acc)) %>%
+  mutate(location = "Global Performance") %>%
+  relocate(location)
+
+colnames(global_only_df) <- colnames(data0[[5]]$byloc.acc)
+colnames(global_only_df)[1] <- "location"
+
+global_only_df %>%
+  kable(digits = 3, format = "html", caption = "Complete cases") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), 
+                font_size = 16, full_width = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#f2f2f2")
+```
+
+::: {style="text-align: center;"}
+# Thanks for your attention!
+:::

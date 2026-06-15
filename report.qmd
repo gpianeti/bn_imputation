@@ -1,0 +1,213 @@
+---
+title: "BN Imputation Report"
+author: "Giuseppe Pianeti, Filippo Campagnolo"
+date: "2026-06-14"
+format:
+  pdf:
+    mermaid-format: png
+  html:
+    self-contained: true
+---
+
+```{r, include=FALSE}
+library(here)
+library(tidyverse)
+library(knitr)
+library(DiagrammeR)
+library(kableExtra)
+library(here)
+data0 <- readRDS(file = here("results/scenario_0.rds"))
+data1 <- readRDS(file = here("results/scenario_1.rds"))
+data2 <- readRDS(file = here("results/scenario_2.rds"))
+data3 <- readRDS(file = here("results/scenario_3.rds"))
+data4 <- readRDS(file = here("results/scenario_4.rds"))
+hd <- readRDS(file = here("results/hd.rds"))
+```
+
+
+The Bayesian Networks Imputation project is the result of the coursework of the Advanced Machine Learning module of the Master in Statistical and Economics Methods for Decision Making at the University of Turin. We analyzed the Heart Disease Dataset from [UCI Repository](https://archive.ics.uci.edu/dataset/45/heart+disease) by trying to predict the presence or absence of a heart disease. In our work we did not limit to a classical analysis, instead we tried to improve the performance of different machine learning algorithms by imputing missing data with Bayesian Networks. Thus, we carried out a sensitivity analysis by performing different reviews on different data configurations: this involved the construction of 4 different version of the data, beyond the main analysis. Later, the missing data were imputed (if needed) and the models fitted and tested. We used Random Forests (RF), Bayesian Additive Regression Trees (BART), a learned Bayesian Network (BN), Naive Bayes (NB) and Tree-Augmented Naive Bayes (TAN). In this brief report we outline the data features, the choices made and the project structure.
+
+
+
+For Bayesian Networks structure learning we chosed the tabu search algorithm with BIC penalization for arcs.
+
+# Heart Disease Dataset and missing data
+The Heart Disease dataset contains $14$ attributes of $920$ patients from $4$ different clinics in the world: Cleveland, Hungarian, Switzerland and Long Beach. For an accurate description of the variables please check the presentation file or the UCI Repository website. So far, machine learning applications on this dataset have concerned on Cleveland clinic only. In this work we attempt to include the other clinics to increase the number of observation and, thus, statistical power. By taking a quick look at the data, we immediately notice the large amount of missing values, most relative to `slope`, `ca` and `thal` variables in the Hungarian, Switzerland and Long Beach clinics.
+```{r, echo=FALSE}
+na_count <- hd %>%
+  group_by(location) %>%
+  summarise(
+    across(everything(), ~ sum(is.na(.x))),
+    obs = n()
+  )
+
+kable(na_count, caption = "NA values and observation per variable and location")
+```
+As we can see, Cleveland is the clinic reporting most of the number of complete cases. This pattern clearly suggets MNAR missing data, i.e. the probability of being missing varies for reasons that are unknown to us, something likely linked to clinic procedures or protocols. Since the tabu algorithm we decided to use for the bayesian netework structure learning requires complete observation, we need to make an assumption of homogeneity across the different clinics in order to transfer correctly the results obtained on the Cleveland complete data to other clinics. In terms of joint probability $\Pr (\mathbf{X}|\texttt{location})= \Pr(X_1,X_2,\dots,X_{13},Y|\texttt{location})$ we want:
+$$
+\Pr (\texttt{slope}, \texttt{ca}, \texttt{thal}|\texttt{location}_i)= \Pr (\texttt{slope}, \texttt{ca}, \texttt{thal}|\texttt{location}_j) \qquad \forall i,j \in\{\texttt{ch}, \texttt{cl}, \texttt{hu}, \texttt{va}\}
+$$
+
+Then, if `slope`, `ca`, `thal` and the other NA values are MCAR or at least MAR we can assume omogeneity of these features across the clinics and, therefore, the transferability of the estimated Bayesian Network for imputation from Cleveland to the other clinics. This assumption holds easily for `slope`, which is a parameter of a common, non-invasive diagnostic test. `ca` and `thal` refer instead to much more invasive and expensive tests that may be administered in a selective or different manner from one clinic to another; therefore, the assumption of homogeneity may not hold true. We will informally test this hypothesis with a sensitivity analysis that we introduce later.
+
+Also, a brief explanatory analysis was carried out to check the magnitude of the deviance from normality (assumed in BN models) of continuous variables, and to assess potential differences in the distributions across the clinics. The results are available in the presentation slides.
+
+# Workflow
+```{mermaid}
+%%| fig-width: 6
+%%| fig-height: 3
+flowchart LR
+    A([Heart Disease<br>dataset]) --> B{Train/Test<br>split}
+    B --"train data"-->C
+    
+     subgraph datainput [Data imputation]
+        %% Nodi Interni
+        C["`**CV loop for<br>data imputation**<br>Tuning parameters:<br>- arcs penalty k<br>- max # parents`"] 
+    end
+    
+    datainput --> N([Imputed<br>train data])
+    
+    N --> D(Random<br>Forests)
+    N --> E(BART)
+    N --> F(Bayes<br>Net)
+    N --> G(Naive<br>Bayes)
+    N --> H(Augmented<br>NB)
+    
+        subgraph train [Models fitting]
+        %% Nodi Interni
+        D
+        E
+        F
+        G
+        H
+    end
+    
+    D --> I
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    
+    subgraph test [Testing]
+        %% Nodi Interni
+        I[Testing trained<br>models on<br>test data] 
+    end
+    
+    B --"test data"--> M([Imputed<br>test data])
+    datainput --> M
+    M --> test
+    
+    test ==> L([Final Results])
+```
+The general workflow consists of 4 main steps:
+
+1. **Data preparation**: the data is loaded, cleaned and formatted accoordingly to the analysis of interest. The 5 scenarios are 0-Main Analysis, 1-Complete Data, 2-Mean/Mode Imputation, 3-Partial Data and 4-Slope data. We describe their configurations in the next section. This procedures are carried out in the `data_loading_cleaning.R` file.
+
+2. **Data imputation**: the dataframe is splitted in train and test set, then missing values are imputed with a Bayesian Network which structure and parameters are defined through a cross-validation. This procedure finds the penalization parameter of BIC `k` and the maximum number of parents `maxp` of the DAG that minimize the reconstruction error of artificially imputed missing data. The metric adopted is the sum of a normalized mean squared error for continuous variables and misclassification rate for discrete ones. If BN imputation is not needed (such as in scenarios 1 and 2) the data is handled accordingly. The relative code is in the `data_imputation.R` file.
+
+3. **Models fitting**: once obtained the imputed train and test sets, the models are validated, fitted and evaluated with balanced accuray. RF and BART hyperparameters, such as the number of trees to be averaged, are chosen through cross-validation. For the BN model a blacklist of arc is defined (banning arcs pointing to root demographic nodes) and both structure and parameters are learned with no more restriction, using BIC penalization and bayes law method. For NB and TAN, continuous variable are discretized with the `discretize()` function and, being their structure fixed, immediately fitted and tested with same methods. The relative file is `models_fitting.R`.
+
+4. **Data storing**: in the `data_storing.R` file the results of the analysis are saved and later used in the presentation and report.
+
+# Scenarios and sensitivity analysis
+Here we present the features of the scenarios and why we adopted them to carry out a sensitivity analysis. Scenario 1 and 2 are designed to check, if the homogeneity assumptions hold, whether the Bayesian Network imputation is preferable comparing to other methods. If models in scenarios 3 and 4 outperform the main analysis, this is consistent with either a violation of the transferability assumption or an intrinsic low predictive power of the excluded variables. The two explanations cannot be distinguished within this experimental design.
+
+0. Main Analysis: in the main analysis we used the entire dataset, we imputed missing data with a cross-validated Bayesian Network and carried out the classification task as descripted above.
+
+1. Complete Cases: this scenario simulates the absence of any imputation strategy by restricting both train and test sets to fully observed records only. Two important limitations must be acknowledged: first, since complete cases belong almost exclusively to the Cleveland clinic, the analysis is effectively clinic-specific rather than multi-center; second, the substantially reduced sample size inherently constrains model performance, making direct comparisons with other scenarios unfair. Despite these limitations, the scenario serves a dual purpose: it provides a lower bound on the performance achievable without imputation, and it acts as a Cleveland-specific benchmark against which the Cleveland subset performance observed in other scenarios can be contrasted.
+
+2. Mean/mode Imputation: here the data configuration to be imputed is the exact same as scenario 0, then missing data is imputed with mean for continuous variables and mode for discrete ones. Therefore, if the homogeneity assumption holds, this scenario would be a perfect comparison with the main analysis to check whether Bayesian Network imputation is preferable with respect to a much more rude and straightforward method such as MM imputation.
+
+3. Partial Data: this scenario excludes `slope`, `ca` and `thal` entirely from the dataset, proceeding with data imputation and model fitting on the remaining variables only. The rationale is to assess whether the homogeneity assumption underlying the transfer of the imputation network from Cleveland to the other clinics holds for these three variables. If models trained and tested without them outperform those of the main analysis, this suggests that the imputed values introduced more noise than signal.
+
+4. Slope Data: the motivation for this scenario mirrors that of the previous one, with one key distinction. Since slope has considerably fewer missing values than ca and thal, its imputation relies on a substantially larger fraction of directly observed data, making the transferability assumption more defensible on empirical grounds. By retaining slope while excluding ca and thal, this scenario allows us to isolate the contribution of a more reliably imputed variable and to assess whether the statistical power it carries justifies its inclusion.
+
+# Results
+Overall, the strongest global performances were achieved in the Slope data scenario, which excludes ca and thal while retaining slope. With the exception of the Bayesian Network classifier and BART — for which the Mean/mode scenario returned a marginally higher accuracy (80.5% vs 80.2%) — all models reached their peak performance in the Slope data configuration. Comparing Slope data against the Main Analysis, every model improved except the Bayesian Network, which dropped from 78.6% to 77.0%, suggesting that the imputed values of ca and thal contributed positively to the BN classifier's structure learning, while being detrimental or neutral for the other methods.
+
+The comparison between Slope data and Partial data — which excludes slope, ca and thal — shows consistent, if modest, improvements across all five models when slope is retained. Our interpretation is that slope satisfies the homogeneity assumption: its distribution in Cleveland appears sufficiently representative of the other clinics, so that its imputed values carry genuine predictive signal. The same cannot be said for ca and thal: the Partial data scenario, which excludes them entirely, outperforms the Main Analysis for all models except Random Forest (0.786 in Main vs 0.784 in Partial, a negligible difference). This pattern is consistent with either a violation of the transferability assumption — meaning that the joint distribution of ca and thal differs systematically across clinics — or an intrinsically low predictive contribution of these variables even under perfect imputation. The two explanations cannot be distinguished within the current experimental design.
+
+Regarding the comparison between Slope data and Mean/mode imputation, the two scenarios produce broadly similar global results. The most notable difference involves Naive Bayes, which achieves 83.4% in Slope data versus 79.4% in Mean/mode imputation, a gap of four percentage points. Smaller differences are observed for Random Forest (79.4% vs 78.7%, in favour of Slope data) and TAN (78.5% vs 79.2%, in favour of Mean/mode), while BART and BN are nearly identical across the two scenarios. Since Naive Bayes consistently achieved the highest accuracy across all scenarios, and is the model most sensitive to the quality of the input distribution — given its explicit probabilistic structure — its improvement under BN imputation provides the strongest evidence that Bayesian Network imputation yields a better data reconstruction than the naive mean/mode strategy. This conclusion, however, is not universal across all classifiers.
+
+Turning to the complete cases scenario, it is important to recall that all five models were trained on approximately 160 observations, substantially fewer than the 500 available in the other scenarios. Despite this constraint, BART achieved its highest accuracy of all scenarios (81.5%), and BN also performed relatively well (79.1%). Conversely, TAN reached its lowest accuracy here (72.8%), and Random Forest also underperformed relative to other scenarios (77.9%). Naive Bayes matched its mean/mode result exactly (79.4%).
+
+An informative comparison arises when contrasting the complete cases results against the Cleveland-specific subset within the Main Analysis, since complete cases consist almost entirely of Cleveland patients. This isolates the effect of incorporating imputed multi-clinic data on Cleveland-specific predictive performance. BART was negatively affected by the expanded dataset, dropping from 81.5% to 78.1%, suggesting that the noise introduced by imputation distorted its highly flexible fit. BN exhibited a similar, though smaller, decline (79.1% to 78.6%). By contrast, Naive Bayes (79.4% to 80.0%), Random Forest (77.9% to 78.8%), and TAN (72.8% to 77.5%) all benefited from the larger training set, indicating that the increased sample size compensated for the additional noise and improved generalisation for these models.
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table <- function(byloc_matrix, g_values, title) {
+  loc_df <- as_tibble(byloc_matrix)
+  colnames(loc_df)[1] <- "location"
+  clinic_levels <- c("ch", "cl", "hu", "va")
+  
+  loc_df <- loc_df %>%
+    mutate(location = clinic_levels[as.integer(location)]) %>%
+    mutate(across(-location, as.numeric))
+  
+  g_row <- as_tibble(t(g_values)) %>%
+    mutate(location = "Global Performance") %>%
+    relocate(location)
+  colnames(g_row) <- colnames(loc_df)
+  
+  total_rows <- nrow(loc_df) + 1
+  tbl <- bind_rows(loc_df, g_row)
+  
+  fmt <- if (knitr::is_latex_output()) "latex" else "html"
+  
+  k <- kable(tbl, digits = 3, format = fmt,
+             caption = title, booktabs = TRUE) %>%
+    row_spec(total_rows, bold = TRUE)
+  
+  if (fmt == "html") {
+    k <- k %>%
+      kable_styling(bootstrap_options = c("striped", "condensed"),
+                    font_size = 14, full_width = TRUE) %>%
+      row_spec(total_rows, background = "#f2f2f2")
+  } else {
+    k <- k %>%
+      kable_styling(latex_options = c("striped", "hold_position", "scale_down"),
+                    font_size = 8)
+  }
+  k
+}
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+make_combined_table(data0[[5]]$byloc.acc, data0[[5]]$gen.acc, "Main Analysis")
+make_combined_table(data2[[5]]$byloc.acc, data2[[5]]$gen.acc, "Mean/Mode Imputation")
+make_combined_table(data3[[5]]$byloc.acc, data3[[5]]$gen.acc, "Partial Data")
+make_combined_table(data4[[5]]$byloc.acc, data4[[5]]$gen.acc, "Slope Data")
+
+fmt <- if (knitr::is_latex_output()) "latex" else "html"
+
+global_only_df <- as_tibble(t(data1[[5]]$gen.acc)) %>%
+  mutate(location = "Global Performance") %>%
+  relocate(location)
+colnames(global_only_df) <- c("location", "Random Forest", "BART", 
+                              "BN", "Naive Bayes", "TAN")
+
+k <- global_only_df %>%
+  kable(digits = 3, format = fmt,
+        caption = "Complete Cases (global only)",
+        booktabs = TRUE) %>%
+  row_spec(1, bold = TRUE)
+
+if (fmt == "html") {
+  k <- k %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"),
+                  font_size = 14, full_width = TRUE) %>%
+    row_spec(1, background = "#f2f2f2")
+} else {
+  k <- k %>%
+    kable_styling(latex_options = c("striped", "hold_position", "scale_down"),
+                  font_size = 8)
+}
+k
+```
+
+
+

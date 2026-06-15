@@ -1,0 +1,19 @@
+# R project file
+*.Rproj
+
+# raw data
+data/
+
+# compiled outputs
+results/
+presentation_files/
+presentation.html
+README.html
+
+# R session files
+.RData
+.Rhistory
+.Rproj.user/
+
+# system files
+.DS_Store
