@@ -50,3 +50,5 @@ and place the four `.data` files in the `data/` folder.
 ```
 
 5. Render the report and presentation
+
+## Please find more informations in the report.pdf file
